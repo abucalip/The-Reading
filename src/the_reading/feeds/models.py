@@ -28,7 +28,7 @@ class CandidatePool(BaseModel):
     skipped_duplicate: int = 0
     warnings: list[str] = Field(default_factory=list)
 
-    def to_prompt_list(self, max_articles: int = 60) -> str:
+    def to_prompt_list(self, max_articles: int = 60, include_urls: bool = False) -> str:
         """Render a compact metadata-only list for LLM curation."""
         if not self.articles:
             return "No candidate articles available."
@@ -45,7 +45,8 @@ class CandidatePool(BaseModel):
             if article.tags:
                 meta_parts.append(f"[{', '.join(article.tags[:3])}]")
             lines.append(" ".join(meta_parts))
-            lines.append(f"    URL: {article.url}")
+            if include_urls:
+                lines.append(f"    URL: {article.url}")
             if article.summary:
                 lines.append(f"    Summary: {article.summary}")
 

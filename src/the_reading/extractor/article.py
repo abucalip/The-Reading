@@ -33,6 +33,11 @@ DEFAULT_BROWSER_HEADERS = {
     "Sec-Fetch-Site": "none",
     "Sec-Fetch-User": "?1",
 }
+DEFAULT_READER_HEADERS = {
+    "User-Agent": "TheReading/0.1 (+https://github.com/the-reading)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 DEFAULT_TIMEOUT_SECONDS = 15.0
 ARCHIVE_TIMEOUT_SECONDS = 8.0
 
@@ -226,6 +231,17 @@ class ArticleExtractor:
             logger.warning("HTTP error fetching %s: %s", url, exc)
             return None
 
+        if not is_archive and response.status_code == 403:
+            try:
+                retry_resp = client.get(url, headers=DEFAULT_READER_HEADERS)
+                if retry_resp.status_code < 400 and not _looks_like_challenge(
+                    retry_resp.status_code, retry_resp.text
+                ):
+                    return str(retry_resp.url), retry_resp.text
+                response = retry_resp
+            except httpx.HTTPError:
+                pass
+
         if _looks_like_challenge(response.status_code, response.text):
             logger.warning(
                 "Blocked or anti-bot challenge (%d) at %s; skipping",
@@ -292,6 +308,36 @@ class ArticleExtractor:
                 break
 
         return None
+
+    def _try_wayback(
+        self,
+        client: httpx.Client,
+        article_url: str,
+        min_words: int,
+    ) -> tuple[str, int, str] | None:
+        """Try extracting from the Internet Archive Wayback Machine."""
+        api_host = "archive.org"
+        if api_host in self._unreachable_hosts:
+            return None
+        api_url = f"https://archive.org/wayback/available?url={quote_plus(article_url)}"
+        try:
+            resp = client.get(api_url, timeout=self.archive_timeout)
+            if resp.status_code >= 400:
+                return None
+            data = resp.json()
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            logger.warning("HTTP error querying Wayback Machine for %s: %s", article_url, exc)
+            self._unreachable_hosts.add(api_host)
+            logger.info("Marking archive host %s unreachable for remainder of run", api_host)
+            return None
+        except Exception:
+            return None
+
+        closest = (data.get("archived_snapshots") or {}).get("closest") or {}
+        snapshot_url = closest.get("url")
+        if not closest.get("available") or not snapshot_url:
+            return None
+        return self._try_extract(client, str(snapshot_url), min_words, is_archive=True)
 
     def _try_archive_is(
         self,
@@ -374,7 +420,49 @@ class ArticleExtractor:
 
             warnings.append(f"Direct extraction failed or < {min_words} words for {target_url}")
 
-            # 2. removepaywall.com fallback (including embedded archive.is links)
+            # Google News RSS wrapper URLs cannot be resolved by paywall/archive mirrors
+            if "news.google.com/rss/articles/" in target_url:
+                warnings.append(f"Skipping archive fallbacks for Google News wrapper URL: {article.url}")
+                return ExtractedArticle(
+                    url=article.url,
+                    title=article.title,
+                    source=article.source,
+                    author=article.author,
+                    published_at=article.published_at,
+                    summary=article.summary,
+                    why_picked=article.why_picked,
+                    is_wildcard=article.is_wildcard,
+                    content_html=render_link_card_html(article),
+                    word_count=0,
+                    reading_minutes=1,
+                    is_link_card=True,
+                    extraction_method="link_card",
+                    warnings=warnings,
+                )
+
+            # 2. Internet Archive Wayback Machine fallback
+            wb = self._try_wayback(client, target_url, min_words)
+            if wb is not None:
+                clean_html, word_count, resolved_url = wb
+                return ExtractedArticle(
+                    url=article.url,
+                    title=article.title,
+                    source=article.source,
+                    author=article.author,
+                    published_at=article.published_at,
+                    summary=article.summary,
+                    why_picked=article.why_picked,
+                    is_wildcard=article.is_wildcard,
+                    content_html=clean_html,
+                    word_count=word_count,
+                    reading_minutes=_compute_reading_minutes(word_count, wpm),
+                    is_link_card=False,
+                    extraction_method="wayback",
+                    archive_url=resolved_url,
+                    warnings=warnings,
+                )
+
+            # 3. removepaywall.com fallback (including embedded archive.is links)
             rpw = self._try_removepaywall(client, target_url, min_words)
             if rpw is not None:
                 clean_html, word_count, resolved_url = rpw
@@ -396,7 +484,7 @@ class ArticleExtractor:
                     warnings=warnings,
                 )
 
-            # 3. Direct archive.is / archive.ph fallback
+            # 4. Direct archive.is / archive.ph fallback
             arch = self._try_archive_is(client, target_url, min_words)
             if arch is not None:
                 clean_html, word_count, resolved_url = arch
