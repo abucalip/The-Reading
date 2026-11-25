@@ -104,32 +104,32 @@ class _StubClient:
         self.models = _StubModels(response=response, error=error)
 
 
-def test_gemini_curator_validates_urls_and_respects_budget(tmp_path: Path) -> None:
+def test_gemini_curator_validates_ids_and_respects_budget(tmp_path: Path) -> None:
     payload = GeminiCurationResponse(
         editor_note="Cinema and deep-sea exploration for your morning.",
         selections=[
             GeminiSelectionItem(
-                url="https://lrb.co.uk/tarkovsky",
+                article_id=1,
                 why_picked="Pairs directly with your recent Tarkovsky rewatch.",
                 is_wildcard=False,
                 estimated_minutes=25,
                 score=9.4,
             ),
             GeminiSelectionItem(
-                url="https://hallucinated.example.com/fake",
+                article_id=99,
                 why_picked="Should be filtered out.",
                 is_wildcard=False,
                 estimated_minutes=15,
             ),
             GeminiSelectionItem(
-                url="https://longreads.com/oceans",
+                article_id=3,
                 why_picked="A wildcard dive into oceanography.",
                 is_wildcard=True,
                 estimated_minutes=20,
                 score=8.1,
             ),
             GeminiSelectionItem(
-                url="https://parisreview.org/patience",
+                article_id=2,
                 why_picked="Would exceed the 60-minute max budget.",
                 is_wildcard=False,
                 estimated_minutes=25,
@@ -151,7 +151,7 @@ def test_gemini_curator_validates_urls_and_respects_budget(tmp_path: Path) -> No
     assert edition.articles[1].is_wildcard is True
     assert edition.total_estimated_minutes == 45
     assert edition.model_used == "gemini-3.8-flash"
-    assert any("hallucinated.example.com" in w for w in edition.warnings)
+    assert any("99" in w for w in edition.warnings)
 
 
 def test_curate_edition_caches_in_sqlite(tmp_path: Path) -> None:
@@ -159,7 +159,7 @@ def test_curate_edition_caches_in_sqlite(tmp_path: Path) -> None:
         editor_note="Cached edition note.",
         selections=[
             GeminiSelectionItem(
-                url="https://lrb.co.uk/tarkovsky",
+                article_id=1,
                 why_picked="Matches Letterboxd log.",
                 is_wildcard=False,
                 estimated_minutes=30,
@@ -219,7 +219,7 @@ def test_gemini_curator_tops_up_when_below_min_budget(tmp_path: Path) -> None:
         editor_note="Short initial pick.",
         selections=[
             GeminiSelectionItem(
-                url="https://lrb.co.uk/tarkovsky",
+                article_id=1,
                 why_picked="Matches Letterboxd log.",
                 is_wildcard=False,
                 estimated_minutes=10,

@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 CURATION_CACHE_KEY = "curated_edition"
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 DEFAULT_ESTIMATED_MINUTES = 12
+MAX_PROMPT_ARTICLES = 80
+
+
+def _is_google_news_wrapper(url: str) -> bool:
+    return "news.google.com/rss/articles/" in url
 
 
 class Curator(Protocol):
@@ -54,11 +59,11 @@ def _build_curation_prompt(
         f"balanced with standout general long-form essays.\n"
         f"- Include {edition_cfg.wildcard_slots} wildcard/serendipity pick(s) (is_wildcard=true) that stretch "
         f"beyond their recent signals.\n"
-        f"- Use ONLY exact URLs from the candidate list. Do not invent or modify URLs.\n"
+        f"- Return ONLY valid integer 'article_id' values from the numbered [1]..[N] candidate list below.\n"
         f"- For each pick, write a concise 1-2 sentence 'why_picked' editorial note explaining the connection.\n"
         f"- Write a brief 1-2 sentence 'editor_note' introducing today's edition.\n\n"
         f"{profile.to_prompt_summary()}\n\n"
-        f"{pool.to_prompt_list(max_articles=80)}\n"
+        f"{pool.to_prompt_list(max_articles=MAX_PROMPT_ARTICLES, include_urls=False)}\n"
     )
 
 
@@ -78,8 +83,14 @@ def _fallback_curate(
             warnings=[warning],
         )
 
+    # Prefer direct editorial RSS articles over Google News wrapper URLs so fallback
+    # editions reliably extract full-text reads instead of link cards.
+    direct_articles = [a for a in pool.articles if not _is_google_news_wrapper(a.url)]
+    wrapper_articles = [a for a in pool.articles if _is_google_news_wrapper(a.url)]
+    ordered_pool = direct_articles if direct_articles else wrapper_articles
+
     by_source: dict[str, list[CandidateArticle]] = defaultdict(list)
-    for article in pool.articles:
+    for article in ordered_pool:
         by_source[article.source].append(article)
 
     selected_candidates: list[CandidateArticle] = []
@@ -141,7 +152,7 @@ class GeminiCurator:
         self,
         api_key: str,
         model: str = DEFAULT_GEMINI_MODEL,
-        max_output_tokens: int = 2048,
+        max_output_tokens: int = 4096,
         client: Any | None = None,
     ) -> None:
         self.api_key = api_key
@@ -176,15 +187,19 @@ class GeminiCurator:
 
         prompt = _build_curation_prompt(profile, pool, edition_cfg)
         try:
+            config_kwargs: dict[str, Any] = {
+                "response_mime_type": "application/json",
+                "response_schema": GeminiCurationResponse,
+                "max_output_tokens": self.max_output_tokens,
+                "temperature": 0.3,
+            }
+            if hasattr(types, "ThinkingConfig"):
+                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+
             response = self._get_client().models.generate_content(
                 model=self.model,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=GeminiCurationResponse,
-                    max_output_tokens=self.max_output_tokens,
-                    temperature=0.3,
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
             parsed = self._parse_response(response)
         except Exception as exc:
@@ -192,18 +207,21 @@ class GeminiCurator:
             logger.warning(msg)
             return _fallback_curate(pool, edition_cfg, warning=msg)
 
-        by_url = {article.url: article for article in pool.articles}
+        by_id = {
+            idx: article
+            for idx, article in enumerate(pool.articles[:MAX_PROMPT_ARTICLES], start=1)
+        }
         seen_urls: set[str] = set()
         warnings: list[str] = []
         selected: list[CuratedArticle] = []
         total_minutes = 0
 
         for item in parsed.selections:
-            candidate = by_url.get(item.url)
+            candidate = by_id.get(item.article_id)
             if candidate is None:
-                warnings.append(f"Ignored unknown URL from Gemini: {item.url}")
+                warnings.append(f"Ignored unknown article_id from Gemini: {item.article_id}")
                 continue
-            if item.url in seen_urls:
+            if candidate.url in seen_urls:
                 continue
             if (
                 selected
@@ -211,7 +229,7 @@ class GeminiCurator:
             ):
                 continue
 
-            seen_urls.add(item.url)
+            seen_urls.add(candidate.url)
             selected.append(
                 CuratedArticle(
                     url=candidate.url,
@@ -230,13 +248,16 @@ class GeminiCurator:
             total_minutes += item.estimated_minutes
 
         if not selected:
-            msg = "Gemini returned no valid candidate URLs; using fallback curation."
+            msg = "Gemini returned no valid candidate IDs; using fallback curation."
             logger.warning(msg)
             return _fallback_curate(pool, edition_cfg, warning=msg)
 
         # Top up from remaining candidates if Gemini came in under the minimum budget
         if total_minutes < edition_cfg.target_reading_minutes_min:
-            for candidate in pool.articles:
+            topup_candidates = [
+                a for a in pool.articles if not _is_google_news_wrapper(a.url)
+            ] + [a for a in pool.articles if _is_google_news_wrapper(a.url)]
+            for candidate in topup_candidates:
                 if candidate.url in seen_urls:
                     continue
                 if total_minutes + DEFAULT_ESTIMATED_MINUTES > edition_cfg.target_reading_minutes_max:

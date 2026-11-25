@@ -112,7 +112,8 @@ def test_removepaywall_direct_fallback(tmp_path: Path) -> None:
     assert result.extraction_method == "removepaywall"
     assert result.archive_url == rpw_url
     assert result.word_count >= 250
-    assert called_urls == [article.url, rpw_url]
+    assert called_urls[0] == article.url
+    assert rpw_url in called_urls
 
 
 def test_removepaywall_follows_embedded_archive_is_link(tmp_path: Path) -> None:

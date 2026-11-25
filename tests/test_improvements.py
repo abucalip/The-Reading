@@ -267,3 +267,190 @@ def test_letterboxd_falls_back_to_recent_entries_when_lookback_empty(
     assert len(signals) == 1
     assert signals[0].title == "Stalker (1979)"
     assert signals[0].rating == 4.5
+
+
+def test_seerr_resolves_missing_title_via_detail_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from the_reading.connectors.seerr import SeerrConnector
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/request":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "type": "tv",
+                            "createdAt": "2026-11-24T10:00:00Z",
+                            "media": {"tmdbId": 126116},
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/api/v1/tv/126116":
+            return httpx.Response(
+                200,
+                json={"name": "The Bear", "genres": [{"name": "Drama"}]},
+            )
+        return httpx.Response(404)
+
+    orig_client = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kwargs: orig_client(transport=httpx.MockTransport(handler)),
+    )
+
+    connector = SeerrConnector(
+        base_url="http://192.168.1.12:5055",
+        api_key="test-key",
+        now=datetime(2026, 11, 25, tzinfo=timezone.utc),
+    )
+    signals = connector.fetch_signals(lookback_days=14)
+    assert len(signals) == 1
+    assert signals[0].title == "The Bear"
+    assert signals[0].genres == ["Drama"]
+
+
+def test_discovery_filters_tmdb_placeholders_and_decodes_google_news_url() -> None:
+    import base64
+
+    from the_reading.feeds.discovery import decode_google_news_url
+
+    profile = InterestProfile(
+        edition_date="2026-11-25",
+        lookback_days=14,
+        signals=[
+            SignalItem(
+                source="seerr",
+                kind="series",
+                title="TMDB #126116",
+                timestamp="2026-11-24T00:00:00+00:00",
+            ),
+            SignalItem(
+                source="jellyfin",
+                kind="series",
+                title="Severance",
+                timestamp="2026-11-24T00:00:00+00:00",
+            ),
+        ],
+    )
+    queries = build_discovery_queries(profile, max_queries=4)
+    topics = [q[1] for q in queries]
+    assert "Severance" in topics
+    assert not any(t.startswith("TMDB") for t in topics)
+
+    raw_payload = b"\x08\x13\x22\x24https://example.org/longform-essay\xd2\x01\x00"
+    token = base64.urlsafe_b64encode(raw_payload).decode("ascii").rstrip("=")
+    wrapped = f"https://news.google.com/rss/articles/{token}?oc=5"
+    assert decode_google_news_url(wrapped) == "https://example.org/longform-essay"
+
+
+def test_fallback_curate_prefers_direct_feeds_over_google_news_wrappers() -> None:
+    from the_reading.curator.gemini import _fallback_curate
+    from the_reading.feeds.models import CandidateArticle, CandidatePool
+
+    pool = CandidatePool(
+        edition_date="2026-11-25",
+        articles=[
+            CandidateArticle(
+                url="https://news.google.com/rss/articles/CBMiEncryptedToken",
+                title="Wrapper 1",
+                source="Pitchfork",
+                feed_url="https://news.google.com/rss/search?q=test",
+            ),
+            CandidateArticle(
+                url="https://www.lrb.co.uk/the-paper/sample-essay",
+                title="Direct LRB Essay",
+                source="London Review of Books",
+                feed_url="https://www.lrb.co.uk/feeds/rss",
+            ),
+        ],
+    )
+    edition = _fallback_curate(pool, EditionConfig(target_reading_minutes_min=12), warning="test")
+    assert [a.url for a in edition.articles] == ["https://www.lrb.co.uk/the-paper/sample-essay"]
+
+
+def test_extractor_skips_archive_fallbacks_for_google_news_wrapper() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, text="<html><body>Google News</body></html>")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    extractor = ArticleExtractor(client=client, extract_fn=lambda raw, url: None)
+    article = CuratedArticle(
+        url="https://news.google.com/rss/articles/CBMiEncryptedToken?oc=5",
+        title="Wrapped Story",
+        source="Some Magazine",
+        why_picked="Relevant.",
+    )
+    extracted = extractor.extract(article, EditionConfig(min_extracted_words=250))
+    assert extracted.is_link_card
+    assert not any("removepaywall.com" in u or "archive.is" in u for u in calls)
+
+
+def test_extractor_retries_403_with_reader_user_agent() -> None:
+    full_text = "<p>" + ("word " * 300) + "</p>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ua = request.headers.get("user-agent", "")
+        if "TheReading" in ua:
+            return httpx.Response(200, text=f"<html><body><article>{full_text}</article></body></html>")
+        return httpx.Response(403, text="Forbidden")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    extractor = ArticleExtractor(
+        client=client,
+        extract_fn=lambda raw, url: (full_text, 300),
+    )
+    article = CuratedArticle(
+        url="https://www.theguardian.com/news/2026/nov/24/sample",
+        title="Guardian Long Read",
+        source="The Guardian — The Long Read",
+        why_picked="Great read.",
+    )
+    extracted = extractor.extract(article, EditionConfig(min_extracted_words=250))
+    assert not extracted.is_link_card
+    assert extracted.extraction_method == "direct"
+    assert extracted.word_count == 300
+
+
+def test_extractor_uses_wayback_machine_fallback() -> None:
+    full_text = "<p>" + ("word " * 300) + "</p>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.startswith("https://archive.org/wayback/available"):
+            return httpx.Response(
+                200,
+                json={
+                    "archived_snapshots": {
+                        "closest": {
+                            "available": True,
+                            "url": "https://web.archive.org/web/20261125/https://paywalled.example/story",
+                        }
+                    }
+                },
+            )
+        if url.startswith("https://web.archive.org/"):
+            return httpx.Response(200, text=f"<html><body><article>{full_text}</article></body></html>")
+        return httpx.Response(403, text="Paywall")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    extractor = ArticleExtractor(
+        client=client,
+        extract_fn=lambda raw, url: (full_text, 300) if "web.archive.org" in url else None,
+    )
+    article = CuratedArticle(
+        url="https://paywalled.example/story",
+        title="Paywalled Story",
+        source="Magazine",
+        why_picked="Relevant.",
+    )
+    extracted = extractor.extract(article, EditionConfig(min_extracted_words=250))
+    assert not extracted.is_link_card
+    assert extracted.extraction_method == "wayback"
+    assert extracted.word_count == 300

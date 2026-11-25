@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 from collections import Counter
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 import feedparser
 import httpx
@@ -23,6 +24,8 @@ from the_reading.interest.models import InterestProfile
 logger = logging.getLogger(__name__)
 
 _YEAR_SUFFIX_RE = re.compile(r"\s*\(\d{4}\)\s*$")
+_TMDB_PLACEHOLDER_RE = re.compile(r"^tmdb\s*#", re.IGNORECASE)
+_EMBEDDED_URL_RE = re.compile(rb"https?://[^\x00-\x20\x7f-\xff\"'<>]+")
 _GOOGLE_NEWS_RSS_BASE = "https://news.google.com/rss/search"
 _DEFAULT_HEADERS = {
     "User-Agent": (
@@ -31,6 +34,30 @@ _DEFAULT_HEADERS = {
     ),
     "Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
 }
+
+
+def decode_google_news_url(url: str) -> str:
+    """Best-effort offline decode of unencrypted Google News RSS article URLs."""
+    parsed = urlparse(url)
+    if parsed.netloc.lower() != "news.google.com":
+        return url
+    marker = "/rss/articles/"
+    if marker not in parsed.path:
+        return url
+    token = parsed.path.split(marker, 1)[1].strip("/")
+    if not token:
+        return url
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode(padded)
+        match = _EMBEDDED_URL_RE.search(raw)
+        if match:
+            decoded = match.group(0).decode("ascii", errors="ignore")
+            if decoded.startswith(("http://", "https://")) and "news.google.com" not in decoded:
+                return decoded
+    except Exception:
+        pass
+    return url
 
 
 def _clean_film_title(title: str) -> str:
@@ -63,11 +90,11 @@ def build_discovery_queries(
     for signal in profile.signals:
         if signal.kind == "film":
             name = _clean_film_title(signal.title)
-            if name and name not in film_topics:
+            if name and not _TMDB_PLACEHOLDER_RE.match(name) and name not in film_topics:
                 film_topics.append(name)
         elif signal.kind == "series":
             name = _clean_series_title(signal.title)
-            if name and name not in series_topics:
+            if name and not _TMDB_PLACEHOLDER_RE.match(name) and name not in series_topics:
                 series_topics.append(name)
         elif signal.kind == "music":
             if signal.creator and signal.creator.strip():
@@ -167,7 +194,7 @@ class InterestDiscoveryFetcher:
                     if not raw_link or not str(raw_link).startswith(("http://", "https://")):
                         continue
 
-                    url = canonicalize_url(str(raw_link))
+                    url = canonicalize_url(decode_google_news_url(str(raw_link)))
                     raw_title = _clean_text(entry.get("title")) or "Untitled"
 
                     source_info = entry.get("source")

@@ -35,7 +35,7 @@ class CuratedEdition(BaseModel):
 class GeminiSelectionItem(BaseModel):
     """Structured selection item returned by Gemini."""
 
-    url: str
+    article_id: int = Field(ge=1)
     why_picked: str
     is_wildcard: bool = False
     estimated_minutes: int = Field(default=12, ge=1, le=90)
