@@ -17,6 +17,7 @@ class FeedConfig(BaseModel):
 
 class EditionConfig(BaseModel):
     title: str = "The Reading"
+    max_articles: int = 20
     target_reading_minutes_min: int = 60
     target_reading_minutes_max: int = 120
     words_per_minute: int = 220

@@ -491,3 +491,45 @@ def test_extractor_resolves_encrypted_google_news_url() -> None:
     assert not extracted.is_link_card
     assert extracted.extraction_method == "direct"
     assert extracted.word_count == 300
+
+
+def test_build_epub_embeds_article_images(tmp_path: object) -> None:
+    import zipfile
+    from pathlib import Path
+
+    from the_reading.epub.builder import build_epub
+    from the_reading.extractor.models import ExtractedArticle, ExtractedEdition
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://example.org/photo.png":
+            return httpx.Response(200, content=png_bytes, headers={"Content-Type": "image/png"})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    edition = ExtractedEdition(
+        edition_date="2026-11-26",
+        editor_note="With photos.",
+        articles=[
+            ExtractedArticle(
+                url="https://example.org/story",
+                title="Photo Essay",
+                source="Example",
+                why_picked="Visual essay.",
+                content_html='<p>Intro</p><img src="/photo.png" srcset="/photo-2x.png 2x" alt="Scene" />',
+                word_count=300,
+                reading_minutes=2,
+            )
+        ],
+        total_reading_minutes=2,
+        full_text_count=1,
+    )
+    out = build_epub(edition, Path(str(tmp_path)) / "test.epub", http_client=client)
+    with zipfile.ZipFile(out) as zf:
+        names = zf.namelist()
+        embedded_imgs = [n for n in names if "images/" in n and n.endswith(".png")]
+        assert len(embedded_imgs) == 1
+        chapter_html = zf.read("EPUB/article_01.xhtml").decode("utf-8")
+        assert 'src="images/' in chapter_html
+        assert "srcset=" not in chapter_html
