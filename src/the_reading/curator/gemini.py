@@ -31,6 +31,10 @@ def _is_google_news_wrapper(url: str) -> bool:
     return "news.google.com/rss/articles/" in url
 
 
+def _is_interest_article(article: CandidateArticle) -> bool:
+    return "interest-match" in article.tags
+
+
 class Curator(Protocol):
     """Protocol for daily edition curators."""
 
@@ -52,8 +56,9 @@ def _build_curation_prompt(
         f"You are the editor of '{edition_cfg.title}', a personalized daily long-form reading edition.\n"
         f"Select articles from the candidate list below for edition date {pool.edition_date}.\n\n"
         f"Editorial guidelines:\n"
-        f"- Select up to {edition_cfg.max_articles} articles (aim for {edition_cfg.max_articles} when enough "
-        f"strong candidates exist; ignore total reading time limits).\n"
+        f"- Select up to {edition_cfg.max_rss_articles} articles from the configured editorial RSS feeds "
+        f"and up to {edition_cfg.max_interest_articles} articles tagged [interest-match] from Interest Discovery "
+        f"(up to {edition_cfg.max_articles} articles total; ignore reading time limits).\n"
         f"- Strongly prioritize a rich mix that includes articles directly related to the reader's recent "
         f"films (Letterboxd/Seerr), series (Jellyfin/Seerr), and music artists or genres (Navidrome), "
         f"balanced with standout general long-form essays.\n"
@@ -83,32 +88,42 @@ def _fallback_curate(
             warnings=[warning],
         )
 
-    # Prefer direct editorial RSS articles over Google News wrapper URLs so fallback
-    # editions reliably extract full-text reads instead of link cards.
-    direct_articles = [a for a in pool.articles if not _is_google_news_wrapper(a.url)]
-    wrapper_articles = [a for a in pool.articles if _is_google_news_wrapper(a.url)]
-    ordered_pool = direct_articles if direct_articles else wrapper_articles
+    def _round_robin_pick(candidates: list[CandidateArticle], limit: int) -> list[CandidateArticle]:
+        if limit <= 0 or not candidates:
+            return []
+        by_source: dict[str, list[CandidateArticle]] = defaultdict(list)
+        for article in candidates:
+            by_source[article.source].append(article)
+        queues = list(by_source.values())
+        picked: list[CandidateArticle] = []
+        idx = 0
+        while len(picked) < limit:
+            added = False
+            for queue in queues:
+                if idx < len(queue):
+                    picked.append(queue[idx])
+                    added = True
+                    if len(picked) >= limit:
+                        break
+            if not added:
+                break
+            idx += 1
+        return picked
 
-    by_source: dict[str, list[CandidateArticle]] = defaultdict(list)
-    for article in ordered_pool:
-        by_source[article.source].append(article)
+    rss_candidates = [a for a in pool.articles if not _is_interest_article(a)]
+    interest_candidates = [a for a in pool.articles if _is_interest_article(a)]
 
+    picked_rss = _round_robin_pick(rss_candidates, edition_cfg.max_rss_articles)
+    picked_interest = _round_robin_pick(interest_candidates, edition_cfg.max_interest_articles)
+
+    # Interleave RSS and interest picks up to max_articles
     selected_candidates: list[CandidateArticle] = []
-    source_queues = list(by_source.values())
     max_articles = max(1, edition_cfg.max_articles)
-    idx = 0
-
-    while len(selected_candidates) < max_articles:
-        added_in_round = False
-        for queue in source_queues:
-            if idx < len(queue):
-                selected_candidates.append(queue[idx])
-                added_in_round = True
-                if len(selected_candidates) >= max_articles:
-                    break
-        if not added_in_round:
-            break
-        idx += 1
+    for i in range(max(len(picked_rss), len(picked_interest))):
+        if i < len(picked_rss) and len(selected_candidates) < max_articles:
+            selected_candidates.append(picked_rss[i])
+        if i < len(picked_interest) and len(selected_candidates) < max_articles:
+            selected_candidates.append(picked_interest[i])
 
     wildcard_count = min(edition_cfg.wildcard_slots, max(0, len(selected_candidates) - 1))
     curated_articles: list[CuratedArticle] = []
@@ -217,6 +232,11 @@ class GeminiCurator:
         total_minutes = 0
 
         max_articles = max(1, edition_cfg.max_articles)
+        max_rss = max(0, edition_cfg.max_rss_articles)
+        max_interest = max(0, edition_cfg.max_interest_articles)
+        rss_count = 0
+        interest_count = 0
+
         for item in parsed.selections:
             if len(selected) >= max_articles:
                 break
@@ -226,8 +246,17 @@ class GeminiCurator:
                 continue
             if candidate.url in seen_urls:
                 continue
+            is_interest = _is_interest_article(candidate)
+            if is_interest and interest_count >= max_interest:
+                continue
+            if not is_interest and rss_count >= max_rss:
+                continue
 
             seen_urls.add(candidate.url)
+            if is_interest:
+                interest_count += 1
+            else:
+                rss_count += 1
             selected.append(
                 CuratedArticle(
                     url=candidate.url,
@@ -252,13 +281,19 @@ class GeminiCurator:
 
         # Top up from remaining candidates if Gemini came in under the minimum budget
         if len(selected) < max_articles and total_minutes < edition_cfg.target_reading_minutes_min:
-            topup_candidates = [
-                a for a in pool.articles if not _is_google_news_wrapper(a.url)
-            ] + [a for a in pool.articles if _is_google_news_wrapper(a.url)]
-            for candidate in topup_candidates:
+            for candidate in pool.articles:
                 if candidate.url in seen_urls:
                     continue
+                is_interest = _is_interest_article(candidate)
+                if is_interest and interest_count >= max_interest:
+                    continue
+                if not is_interest and rss_count >= max_rss:
+                    continue
                 seen_urls.add(candidate.url)
+                if is_interest:
+                    interest_count += 1
+                else:
+                    rss_count += 1
                 selected.append(
                     CuratedArticle(
                         url=candidate.url,
