@@ -347,29 +347,43 @@ def test_discovery_filters_tmdb_placeholders_and_decodes_google_news_url() -> No
     assert decode_google_news_url(wrapped) == "https://example.org/longform-essay"
 
 
-def test_fallback_curate_prefers_direct_feeds_over_google_news_wrappers() -> None:
+def test_fallback_curate_respects_rss_and_interest_caps() -> None:
     from the_reading.curator.gemini import _fallback_curate
     from the_reading.feeds.models import CandidateArticle, CandidatePool
 
+    rss_articles = [
+        CandidateArticle(
+            url=f"https://www.lrb.co.uk/the-paper/essay-{i}",
+            title=f"LRB Essay {i}",
+            source="London Review of Books",
+            feed_url="https://www.lrb.co.uk/feeds/rss",
+        )
+        for i in range(15)
+    ]
+    interest_articles = [
+        CandidateArticle(
+            url=f"https://news.google.com/rss/articles/CBMiToken{i}",
+            title=f"Interest Story {i}",
+            source=f"Magazine {i}",
+            feed_url="https://news.google.com/rss/search?q=test",
+            tags=["interest-match", "music", "Portishead"],
+        )
+        for i in range(15)
+    ]
     pool = CandidatePool(
-        edition_date="2026-11-25",
-        articles=[
-            CandidateArticle(
-                url="https://news.google.com/rss/articles/CBMiEncryptedToken",
-                title="Wrapper 1",
-                source="Pitchfork",
-                feed_url="https://news.google.com/rss/search?q=test",
-            ),
-            CandidateArticle(
-                url="https://www.lrb.co.uk/the-paper/sample-essay",
-                title="Direct LRB Essay",
-                source="London Review of Books",
-                feed_url="https://www.lrb.co.uk/feeds/rss",
-            ),
-        ],
+        edition_date="2026-11-26",
+        articles=rss_articles + interest_articles,
     )
-    edition = _fallback_curate(pool, EditionConfig(target_reading_minutes_min=12), warning="test")
-    assert [a.url for a in edition.articles] == ["https://www.lrb.co.uk/the-paper/sample-essay"]
+    edition = _fallback_curate(
+        pool,
+        EditionConfig(max_articles=20, max_rss_articles=10, max_interest_articles=10),
+        warning="test",
+    )
+    assert len(edition.articles) == 20
+    rss_picked = [a for a in edition.articles if "interest-match" not in a.tags]
+    interest_picked = [a for a in edition.articles if "interest-match" in a.tags]
+    assert len(rss_picked) == 10
+    assert len(interest_picked) == 10
 
 
 def test_extractor_skips_archive_fallbacks_for_google_news_wrapper() -> None:
