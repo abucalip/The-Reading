@@ -1,0 +1,29 @@
+edition:
+  title: "The Reading"
+  target_reading_minutes_min: 60
+  target_reading_minutes_max: 120
+  words_per_minute: 220
+  wildcard_slots: 1
+  min_extracted_words: 250
+  gemini_model: "gemini-3.8-flash"
+
+interest:
+  lookback_days: 14
+  letterboxd_username: "nikkyvarga"
+  enable_interest_discovery: true
+  max_discovery_queries: 8
+
+delivery:
+  drive_folder_name: "The Reading"
+  archive_subfolder_name: "Archive"
+  archive_after_days: 21
+
+feeds:
+  - name: "The Paris Review"
+    url: "https://www.theparisreview.org/blog/feed/"
+  - name: "London Review of Books"
+    url: "https://www.lrb.co.uk/feeds/rss"
+  - name: "The Guardian — The Long Read"
+    url: "https://www.theguardian.com/news/series/the-long-read/rss"
+  - name: "Longreads"
+    url: "https://longreads.com/feed/"

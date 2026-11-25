@@ -1,0 +1,204 @@
+"""Interest-driven article discovery across reputable web publications via Google News RSS."""
+
+from __future__ import annotations
+
+import logging
+import re
+from collections import Counter
+from urllib.parse import quote_plus
+
+import feedparser
+import httpx
+
+from the_reading.connectors.base import DEFAULT_TIMEOUT_SECONDS
+from the_reading.feeds.models import CandidateArticle
+from the_reading.feeds.rss import (
+    _clean_text,
+    _entry_published_at,
+    _entry_summary,
+    canonicalize_url,
+)
+from the_reading.interest.models import InterestProfile
+
+logger = logging.getLogger(__name__)
+
+_YEAR_SUFFIX_RE = re.compile(r"\s*\(\d{4}\)\s*$")
+_GOOGLE_NEWS_RSS_BASE = "https://news.google.com/rss/search"
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+}
+
+
+def _clean_film_title(title: str) -> str:
+    return _YEAR_SUFFIX_RE.sub("", title).strip()
+
+
+def _clean_series_title(title: str) -> str:
+    if " — " in title:
+        return title.split(" — ", 1)[0].strip()
+    return _YEAR_SUFFIX_RE.sub("", title).strip()
+
+
+def build_discovery_queries(
+    profile: InterestProfile,
+    max_queries: int = 8,
+) -> list[tuple[str, str, str]]:
+    """Build balanced (kind, topic, query) tuples from the user's interest profile.
+
+    Round-robins across films, series, and music (artists + genres) so every
+    active interest category gets representation.
+    """
+    if max_queries <= 0 or not profile.signals:
+        return []
+
+    film_topics: list[str] = []
+    series_topics: list[str] = []
+    artist_counts: Counter[str] = Counter()
+    genre_counts: Counter[str] = Counter()
+
+    for signal in profile.signals:
+        if signal.kind == "film":
+            name = _clean_film_title(signal.title)
+            if name and name not in film_topics:
+                film_topics.append(name)
+        elif signal.kind == "series":
+            name = _clean_series_title(signal.title)
+            if name and name not in series_topics:
+                series_topics.append(name)
+        elif signal.kind == "music":
+            if signal.creator and signal.creator.strip():
+                artist_counts[signal.creator.strip()] += 1
+            for genre in signal.genres:
+                g = genre.strip()
+                if g:
+                    genre_counts[g] += 1
+
+    film_queries = [
+        ("film", topic, f'"{topic}" film (essay OR review OR analysis OR retrospective)')
+        for topic in film_topics
+    ]
+    series_queries = [
+        ("series", topic, f'"{topic}" series (essay OR review OR analysis OR interview)')
+        for topic in series_topics
+    ]
+
+    music_queries: list[tuple[str, str, str]] = []
+    for artist, _ in artist_counts.most_common(6):
+        music_queries.append(
+            ("music", artist, f'"{artist}" music (interview OR essay OR review OR profile)')
+        )
+    for genre, _ in genre_counts.most_common(3):
+        music_queries.append(
+            ("music", genre, f'"{genre}" music (essay OR history OR feature)')
+        )
+
+    buckets = [q for q in (film_queries, series_queries, music_queries) if q]
+    selected: list[tuple[str, str, str]] = []
+    idx = 0
+    while len(selected) < max_queries:
+        added = False
+        for bucket in buckets:
+            if idx < len(bucket):
+                selected.append(bucket[idx])
+                added = True
+                if len(selected) >= max_queries:
+                    break
+        if not added:
+            break
+        idx += 1
+
+    return selected
+
+
+def build_google_news_rss_url(query: str) -> str:
+    """Build a Google News RSS search URL for a query."""
+    return f"{_GOOGLE_NEWS_RSS_BASE}?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+
+
+class InterestDiscoveryFetcher:
+    """Discovers articles across reputable web sources for the user's films, series, and music."""
+
+    def __init__(
+        self,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        per_query_limit: int = 4,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self.timeout = timeout
+        self.per_query_limit = per_query_limit
+        self._client = client
+
+    def fetch_for_profile(
+        self,
+        profile: InterestProfile,
+        max_queries: int = 8,
+    ) -> list[CandidateArticle]:
+        """Run interest-driven RSS queries and return normalized CandidateArticle items."""
+        queries = build_discovery_queries(profile, max_queries=max_queries)
+        if not queries:
+            return []
+
+        owns_client = self._client is None
+        client = self._client or httpx.Client(
+            timeout=self.timeout,
+            follow_redirects=True,
+            headers=_DEFAULT_HEADERS,
+        )
+
+        articles: list[CandidateArticle] = []
+        try:
+            for kind, topic, query in queries:
+                feed_url = build_google_news_rss_url(query)
+                try:
+                    response = client.get(feed_url)
+                    response.raise_for_status()
+                except Exception as exc:
+                    logger.warning("Interest discovery query failed for '%s': %s", topic, exc)
+                    continue
+
+                parsed = feedparser.parse(response.text)
+                added = 0
+                for entry in parsed.entries:
+                    raw_link = entry.get("link") or entry.get("id")
+                    if not raw_link or not str(raw_link).startswith(("http://", "https://")):
+                        continue
+
+                    url = canonicalize_url(str(raw_link))
+                    raw_title = _clean_text(entry.get("title")) or "Untitled"
+
+                    source_info = entry.get("source")
+                    pub_name = (
+                        _clean_text(source_info.get("title"))
+                        if isinstance(source_info, dict)
+                        else None
+                    )
+                    # Google News titles often end with " - Publication Name"
+                    title = raw_title
+                    if pub_name and title.endswith(f" - {pub_name}"):
+                        title = title[: -(len(pub_name) + 3)].strip()
+
+                    source_label = pub_name or "Web Discovery"
+                    articles.append(
+                        CandidateArticle(
+                            url=url,
+                            title=title,
+                            source=source_label,
+                            feed_url=feed_url,
+                            author=_clean_text(entry.get("author")),
+                            published_at=_entry_published_at(entry),
+                            summary=_entry_summary(entry),
+                            tags=["interest-match", kind, topic],
+                        )
+                    )
+                    added += 1
+                    if added >= self.per_query_limit:
+                        break
+        finally:
+            if owns_client:
+                client.close()
+
+        return articles

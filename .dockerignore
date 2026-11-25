@@ -1,0 +1,13 @@
+.git/
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.env
+data/
+*.db
+*.sqlite3
+*.epub
+.DS_Store
+tests/
+IMPLEMENTATION_PLAN.md

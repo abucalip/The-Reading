@@ -1,0 +1,29 @@
+services:
+  the-reading:
+    build: .
+    image: the-reading:latest
+    container_name: the-reading
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Europe/Paris}
+      CRON_SCHEDULE: ${CRON_SCHEDULE:-0 6 * * *}
+      DATA_DIR: /data
+      CONFIG_PATH: /app/config.yaml
+      GDRIVE_CREDENTIALS_PATH: /data/gdrive_credentials.json
+      GDRIVE_TOKEN_PATH: /data/gdrive_token.json
+    volumes:
+      - ./data:/data
+      - ./config.yaml:/app/config.yaml:ro
+    # Run daily on CRON_SCHEDULE; for one-off runs use:
+    #   docker compose run --rm --entrypoint the-reading the-reading --dry-run
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        printenv | sed 's/^\(.*\)$/export \1/g' > /etc/environment.sh
+        echo "${CRON_SCHEDULE:-0 6 * * *} . /etc/environment.sh && /usr/local/bin/the-reading >> /proc/1/fd/1 2>&1" > /etc/cron.d/the-reading
+        chmod 0644 /etc/cron.d/the-reading
+        crontab /etc/cron.d/the-reading
+        echo "Scheduled The Reading with cron: ${CRON_SCHEDULE:-0 6 * * *}"
+        exec cron -f
