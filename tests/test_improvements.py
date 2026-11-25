@@ -454,3 +454,82 @@ def test_extractor_uses_wayback_machine_fallback() -> None:
     assert not extracted.is_link_card
     assert extracted.extraction_method == "wayback"
     assert extracted.word_count == 300
+
+
+def test_extractor_resolves_encrypted_google_news_url() -> None:
+    full_text = "<p>" + ("word " * 300) + "</p>"
+    target = "https://www.pastemagazine.com/music/portishead/dummy-at-30"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "news.google.com/rss/articles/" in url:
+            return httpx.Response(
+                200,
+                text='<div data-n-a-sg="SIG123" data-n-a-ts="1764100000"></div>',
+            )
+        if "news.google.com/_/DotsSplashUi/data/batchexecute" in url:
+            return httpx.Response(
+                200,
+                text=f')]}}\'\\n[["wrb.fr","Fbv4je","[\\"garturlres\\",\\"{target}\\",1]"]]',
+            )
+        if url == target:
+            return httpx.Response(200, text=f"<html><body><article>{full_text}</article></body></html>")
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    extractor = ArticleExtractor(
+        client=client,
+        extract_fn=lambda raw, url: (full_text, 300) if "pastemagazine.com" in url else None,
+    )
+    article = CuratedArticle(
+        url="https://news.google.com/rss/articles/CBMiEncryptedToken?oc=5",
+        title="Portishead's Dummy at 30",
+        source="Paste Magazine",
+        why_picked="Matches your Portishead listening.",
+    )
+    extracted = extractor.extract(article, EditionConfig(min_extracted_words=250))
+    assert not extracted.is_link_card
+    assert extracted.extraction_method == "direct"
+    assert extracted.word_count == 300
+
+
+def test_build_epub_embeds_article_images(tmp_path: object) -> None:
+    import zipfile
+    from pathlib import Path
+
+    from the_reading.epub.builder import build_epub
+    from the_reading.extractor.models import ExtractedArticle, ExtractedEdition
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://example.org/photo.png":
+            return httpx.Response(200, content=png_bytes, headers={"Content-Type": "image/png"})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    edition = ExtractedEdition(
+        edition_date="2026-11-26",
+        editor_note="With photos.",
+        articles=[
+            ExtractedArticle(
+                url="https://example.org/story",
+                title="Photo Essay",
+                source="Example",
+                why_picked="Visual essay.",
+                content_html='<p>Intro</p><img src="/photo.png" srcset="/photo-2x.png 2x" alt="Scene" />',
+                word_count=300,
+                reading_minutes=2,
+            )
+        ],
+        total_reading_minutes=2,
+        full_text_count=1,
+    )
+    out = build_epub(edition, Path(str(tmp_path)) / "test.epub", http_client=client)
+    with zipfile.ZipFile(out) as zf:
+        names = zf.namelist()
+        embedded_imgs = [n for n in names if "images/" in n and n.endswith(".png")]
+        assert len(embedded_imgs) == 1
+        chapter_html = zf.read("EPUB/article_01.xhtml").decode("utf-8")
+        assert 'src="images/' in chapter_html
+        assert "srcset=" not in chapter_html

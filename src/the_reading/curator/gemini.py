@@ -52,8 +52,8 @@ def _build_curation_prompt(
         f"You are the editor of '{edition_cfg.title}', a personalized daily long-form reading edition.\n"
         f"Select articles from the candidate list below for edition date {pool.edition_date}.\n\n"
         f"Editorial guidelines:\n"
-        f"- Target total reading time: {edition_cfg.target_reading_minutes_min} to "
-        f"{edition_cfg.target_reading_minutes_max} minutes.\n"
+        f"- Select up to {edition_cfg.max_articles} articles (aim for {edition_cfg.max_articles} when enough "
+        f"strong candidates exist; ignore total reading time limits).\n"
         f"- Strongly prioritize a rich mix that includes articles directly related to the reader's recent "
         f"films (Letterboxd/Seerr), series (Jellyfin/Seerr), and music artists or genres (Navidrome), "
         f"balanced with standout general long-form essays.\n"
@@ -95,16 +95,16 @@ def _fallback_curate(
 
     selected_candidates: list[CandidateArticle] = []
     source_queues = list(by_source.values())
-    target_min = edition_cfg.target_reading_minutes_min
+    max_articles = max(1, edition_cfg.max_articles)
     idx = 0
 
-    while len(selected_candidates) * DEFAULT_ESTIMATED_MINUTES < target_min:
+    while len(selected_candidates) < max_articles:
         added_in_round = False
         for queue in source_queues:
             if idx < len(queue):
                 selected_candidates.append(queue[idx])
                 added_in_round = True
-                if len(selected_candidates) * DEFAULT_ESTIMATED_MINUTES >= target_min:
+                if len(selected_candidates) >= max_articles:
                     break
         if not added_in_round:
             break
@@ -152,7 +152,7 @@ class GeminiCurator:
         self,
         api_key: str,
         model: str = DEFAULT_GEMINI_MODEL,
-        max_output_tokens: int = 4096,
+        max_output_tokens: int = 8192,
         client: Any | None = None,
     ) -> None:
         self.api_key = api_key
@@ -216,17 +216,15 @@ class GeminiCurator:
         selected: list[CuratedArticle] = []
         total_minutes = 0
 
+        max_articles = max(1, edition_cfg.max_articles)
         for item in parsed.selections:
+            if len(selected) >= max_articles:
+                break
             candidate = by_id.get(item.article_id)
             if candidate is None:
                 warnings.append(f"Ignored unknown article_id from Gemini: {item.article_id}")
                 continue
             if candidate.url in seen_urls:
-                continue
-            if (
-                selected
-                and total_minutes + item.estimated_minutes > edition_cfg.target_reading_minutes_max
-            ):
                 continue
 
             seen_urls.add(candidate.url)
@@ -253,14 +251,12 @@ class GeminiCurator:
             return _fallback_curate(pool, edition_cfg, warning=msg)
 
         # Top up from remaining candidates if Gemini came in under the minimum budget
-        if total_minutes < edition_cfg.target_reading_minutes_min:
+        if len(selected) < max_articles and total_minutes < edition_cfg.target_reading_minutes_min:
             topup_candidates = [
                 a for a in pool.articles if not _is_google_news_wrapper(a.url)
             ] + [a for a in pool.articles if _is_google_news_wrapper(a.url)]
             for candidate in topup_candidates:
                 if candidate.url in seen_urls:
-                    continue
-                if total_minutes + DEFAULT_ESTIMATED_MINUTES > edition_cfg.target_reading_minutes_max:
                     continue
                 seen_urls.add(candidate.url)
                 selected.append(
@@ -272,13 +268,13 @@ class GeminiCurator:
                         published_at=candidate.published_at,
                         summary=candidate.summary,
                         tags=candidate.tags,
-                        why_picked=f"Added from {candidate.source} to meet today's reading-time target.",
+                        why_picked=f"Added from {candidate.source} to round out today's edition.",
                         is_wildcard=False,
                         estimated_minutes=DEFAULT_ESTIMATED_MINUTES,
                     )
                 )
                 total_minutes += DEFAULT_ESTIMATED_MINUTES
-                if total_minutes >= edition_cfg.target_reading_minutes_min:
+                if len(selected) >= max_articles or total_minutes >= edition_cfg.target_reading_minutes_min:
                     break
 
         return CuratedEdition(

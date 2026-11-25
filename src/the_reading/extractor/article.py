@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import logging
 import re
 from collections.abc import Callable
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import quote, quote_plus, urljoin, urlparse
 
 import httpx
 import trafilatura
@@ -60,6 +61,9 @@ _ANCHOR_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _TAG_RE = re.compile(r"<[^>]+>")
+_GNEWS_SG_RE = re.compile(r'data-n-a-sg="([^"]+)"')
+_GNEWS_TS_RE = re.compile(r'data-n-a-ts="([^"]+)"')
+_GNEWS_RES_RE = re.compile(r'garturlres","(https?://[^"]+)"')
 _ARCHIVE_HOSTS = frozenset(
     {"archive.is", "archive.ph", "archive.today", "archive.md", "archive.li", "archive.fo", "archive.vn"}
 )
@@ -309,6 +313,66 @@ class ArticleExtractor:
 
         return None
 
+    def _resolve_google_news_url(
+        self,
+        client: httpx.Client,
+        gnews_url: str,
+    ) -> str | None:
+        """Resolve an encrypted Google News RSS article URL to its real publisher URL."""
+        if "news.google.com/rss/articles/" not in gnews_url:
+            return None
+        try:
+            token = gnews_url.split("/articles/", 1)[1].split("?", 1)[0].strip("/")
+            if not token:
+                return None
+            resp = client.get(gnews_url)
+            if resp.status_code >= 400:
+                return None
+            sg_match = _GNEWS_SG_RE.search(resp.text)
+            ts_match = _GNEWS_TS_RE.search(resp.text)
+            if not sg_match or not ts_match:
+                return None
+            inner = json.dumps(
+                [
+                    "garturlreq",
+                    [
+                        ["X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1, None, None, None, None, None, 0, 1],
+                        "X",
+                        "X",
+                        1,
+                        [1, 1, 1],
+                        1,
+                        1,
+                        None,
+                        0,
+                        0,
+                        None,
+                        0,
+                    ],
+                    token,
+                    int(ts_match.group(1)),
+                    sg_match.group(1),
+                ]
+            )
+            outer = json.dumps([[["Fbv4je", inner, None, "generic"]]])
+            batch_resp = client.post(
+                "https://news.google.com/_/DotsSplashUi/data/batchexecute",
+                content="f.req=" + quote(outer),
+                headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+            )
+            if batch_resp.status_code >= 400:
+                return None
+            cleaned = batch_resp.text.replace('\\"', '"')
+            res_match = _GNEWS_RES_RE.search(cleaned)
+            if res_match:
+                resolved = res_match.group(1)
+                if resolved.startswith(("http://", "https://")) and "news.google.com" not in resolved:
+                    logger.info("Resolved Google News URL to %s", resolved)
+                    return resolved
+        except Exception as exc:
+            logger.debug("Google News URL resolution failed for %s: %s", gnews_url, exc)
+        return None
+
     def _try_wayback(
         self,
         client: httpx.Client,
@@ -371,6 +435,12 @@ class ArticleExtractor:
 
         try:
             target_url = article.url
+
+            # 0. Resolve encrypted Google News RSS wrapper URLs to the real publisher URL
+            if "news.google.com/rss/articles/" in target_url:
+                resolved_gnews = self._resolve_google_news_url(client, target_url)
+                if resolved_gnews:
+                    target_url = resolved_gnews
 
             # 1. Direct extraction (with Longreads "Read the story" external link following)
             fetched = self._fetch_html(client, target_url)

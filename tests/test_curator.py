@@ -139,6 +139,7 @@ def test_gemini_curator_validates_ids_and_respects_budget(tmp_path: Path) -> Non
     stub_client = _StubClient(response=SimpleNamespace(parsed=payload))
     curator = GeminiCurator(api_key="test-key", client=stub_client)
     settings = _make_settings(tmp_path)
+    settings.app.edition.max_articles = 2
 
     edition = curator.curate(_make_profile(), _make_pool(), settings.app.edition)
 

@@ -2,16 +2,42 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
+import re
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
+import httpx
 from ebooklib import epub
 
 from the_reading.epub.cover import format_edition_date, format_reading_time, generate_cover_image
 from the_reading.extractor.models import ExtractedArticle, ExtractedEdition
 
 logger = logging.getLogger(__name__)
+
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+_SRC_ATTR_RE = re.compile(r'\bsrc\s*=\s*(["\'])([^"\']+)\1', re.IGNORECASE)
+_STRIP_IMG_ATTR_RE = re.compile(
+    r'\s+(?:srcset|sizes|loading|decoding)\s*=\s*(?:"[^"]*"|\'[^\']*\')',
+    re.IGNORECASE,
+)
+_IMAGE_TIMEOUT_SECONDS = 8.0
+_MAX_IMAGE_BYTES = 3 * 1024 * 1024  # 3 MB per image
+_MAX_IMAGES_PER_ARTICLE = 10
+_IMAGE_EXT_BY_MIME = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+}
+_IMAGE_HEADERS = {
+    "User-Agent": "TheReading/0.1 (+https://github.com/the-reading)",
+    "Accept": "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5",
+}
 
 MOBILE_CSS = """\
 /* Phone-first typography for Moon+ Reader Pro and mobile EPUB readers */
@@ -341,7 +367,73 @@ def _render_frontpage_html(
     )
 
 
-def _render_article_html(article: ExtractedArticle) -> str:
+def _embed_article_images(
+    book: epub.EpubBook,
+    article: ExtractedArticle,
+    content_html: str,
+    client: httpx.Client,
+    image_cache: dict[str, str],
+) -> str:
+    """Download external <img> URLs, embed them in the EPUB, and rewrite src attributes."""
+    if "<img" not in content_html.lower():
+        return content_html
+
+    embedded_in_article = 0
+
+    def _replace_img(match: re.Match[str]) -> str:
+        nonlocal embedded_in_article
+        tag = match.group(0)
+        src_match = _SRC_ATTR_RE.search(tag)
+        if not src_match:
+            return tag
+
+        raw_src = html.unescape(src_match.group(2).strip())
+        if not raw_src or raw_src.startswith(("data:", "images/")):
+            return tag
+
+        resolved_url = urljoin(article.url, raw_src)
+        parsed = urlparse(resolved_url)
+        if parsed.scheme not in ("http", "https"):
+            return tag
+
+        local_path = image_cache.get(resolved_url)
+        if local_path is None:
+            if embedded_in_article >= _MAX_IMAGES_PER_ARTICLE:
+                return tag
+            try:
+                resp = client.get(resolved_url, timeout=_IMAGE_TIMEOUT_SECONDS)
+                if resp.status_code >= 400:
+                    return tag
+                content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                ext = _IMAGE_EXT_BY_MIME.get(content_type)
+                if not ext:
+                    return tag
+                img_bytes = resp.content
+                if not img_bytes or len(img_bytes) > _MAX_IMAGE_BYTES:
+                    return tag
+
+                digest = hashlib.sha256(resolved_url.encode("utf-8")).hexdigest()[:16]
+                local_path = f"images/{digest}.{ext}"
+                item = epub.EpubItem(
+                    uid=f"img_{digest}",
+                    file_name=local_path,
+                    media_type="image/jpeg" if content_type == "image/jpg" else content_type,
+                    content=img_bytes,
+                )
+                book.add_item(item)
+                image_cache[resolved_url] = local_path
+                embedded_in_article += 1
+            except Exception as exc:
+                logger.debug("Skipping image %s: %s", resolved_url, exc)
+                return tag
+
+        cleaned_tag = _STRIP_IMG_ATTR_RE.sub("", tag)
+        return _SRC_ATTR_RE.sub(f'src="{local_path}"', cleaned_tag, count=1)
+
+    return _IMG_TAG_RE.sub(_replace_img, content_html)
+
+
+def _render_article_html(article: ExtractedArticle, content_html: str | None = None) -> str:
     escaped_title = html.escape(article.title)
     escaped_source = html.escape(article.source)
     escaped_url = html.escape(article.url, quote=True)
@@ -384,7 +476,7 @@ def _render_article_html(article: ExtractedArticle) -> str:
         "  </div>\n"
         f"  {why_picked_html}"
         '  <div class="article-body">\n'
-        f"    {article.content_html}\n"
+        f"    {content_html if content_html is not None else article.content_html}\n"
         "  </div>\n"
         '  <div class="article-footer">\n'
         '    <p><a href="frontpage.xhtml">&larr; Back to Front Page</a> &middot; '
@@ -399,6 +491,8 @@ def build_epub(
     edition: ExtractedEdition,
     output_path: Path,
     title: str = "The Reading",
+    embed_images: bool = True,
+    http_client: httpx.Client | None = None,
 ) -> Path:
     """Assemble a phone-optimized EPUB for the given ExtractedEdition."""
     book = epub.EpubBook()
@@ -444,22 +538,42 @@ def build_epub(
         epub.Link("frontpage.xhtml", "Front Page", "frontpage"),
     ]
 
-    for idx, article in enumerate(edition.articles, start=1):
-        filename = _chapter_filename(idx)
-        toc_prefix = "[Wildcard] " if article.is_wildcard else ""
-        toc_title = f"{toc_prefix}{article.title} ({article.reading_minutes} min)"
-
-        chapter = epub.EpubHtml(
-            title=toc_title,
-            file_name=filename,
-            lang="en",
+    owns_client = embed_images and http_client is None
+    client = http_client or (
+        httpx.Client(
+            timeout=_IMAGE_TIMEOUT_SECONDS,
+            follow_redirects=True,
+            headers=_IMAGE_HEADERS,
         )
-        chapter.content = _render_article_html(article).encode("utf-8")
-        chapter.add_item(css_item)
-        book.add_item(chapter)
+        if embed_images
+        else None
+    )
+    image_cache: dict[str, str] = {}
 
-        chapters.append(chapter)
-        toc_entries.append(epub.Link(filename, toc_title, f"article_{idx:02d}"))
+    try:
+        for idx, article in enumerate(edition.articles, start=1):
+            filename = _chapter_filename(idx)
+            toc_prefix = "[Wildcard] " if article.is_wildcard else ""
+            toc_title = f"{toc_prefix}{article.title} ({article.reading_minutes} min)"
+
+            body_html = article.content_html
+            if embed_images and client is not None and not article.is_link_card:
+                body_html = _embed_article_images(book, article, body_html, client, image_cache)
+
+            chapter = epub.EpubHtml(
+                title=toc_title,
+                file_name=filename,
+                lang="en",
+            )
+            chapter.content = _render_article_html(article, content_html=body_html).encode("utf-8")
+            chapter.add_item(css_item)
+            book.add_item(chapter)
+
+            chapters.append(chapter)
+            toc_entries.append(epub.Link(filename, toc_title, f"article_{idx:02d}"))
+    finally:
+        if owns_client and client is not None:
+            client.close()
 
     book.toc = tuple(toc_entries)
     book.add_item(epub.EpubNcx())
