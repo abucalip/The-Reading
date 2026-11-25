@@ -1,6 +1,8 @@
 edition:
   title: "The Reading"
   max_articles: 20
+  max_rss_articles: 10
+  max_interest_articles: 10
   target_reading_minutes_min: 60
   target_reading_minutes_max: 120
   words_per_minute: 220
