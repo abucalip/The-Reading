@@ -96,12 +96,12 @@ figure img {
     margin: 0 auto 8px auto;
 }
 
-figcaption {
+figcaption, .wp-caption-text {
     font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
     font-size: 0.82em;
     line-height: 1.4;
     color: #5c5750;
-    margin: 8px 0 0 0;
+    margin: 8px 0 24px 0;
     text-align: left;
 }
 
@@ -333,7 +333,7 @@ hr {
     body { color: #e8e6e1; }
     h1, h2, h3, h4, .toc-item-title { color: #f2f0eb; }
     a, .masthead-kicker, .article-source, .why-picked-label { color: #e59a7e; }
-    .masthead-meta, .toc-heading, .toc-item-meta, .article-byline, figcaption, .link-card-meta, .link-card-notice, .article-footer {
+    .masthead-meta, .toc-heading, .toc-item-meta, .article-byline, figcaption, .wp-caption-text, .link-card-meta, .link-card-notice, .article-footer {
         color: #b5afa6;
     }
     .editor-note, .why-picked-box, .link-card {
