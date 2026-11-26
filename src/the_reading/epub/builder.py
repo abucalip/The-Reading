@@ -1,4 +1,4 @@
-"""Phone-first EPUB assembly using ebooklib."""
+"""Phone-first EPUB assembly ("The Quiet Folio") using ebooklib."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import hashlib
 import html
 import logging
 import re
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -40,12 +41,15 @@ _IMAGE_HEADERS = {
 }
 
 MOBILE_CSS = """\
-/* Phone-first typography for Moon+ Reader Pro and mobile EPUB readers */
+/* The Quiet Folio — Phone-first typography for Moon+ Reader Pro */
+/* Two typefaces: Literata/Charter (serif) + IBM Plex Sans/system (sans) */
+/* Spacing scale: 4px, 8px, 16px, 24px, 32px */
+
 body {
-    font-family: Georgia, "Times New Roman", serif;
+    font-family: "Literata", Charter, "Bitstream Charter", "Iowan Old Style", Palatino, Georgia, serif;
     font-size: 1em;
-    line-height: 1.65;
-    margin: 0.9em 0.95em;
+    line-height: 1.52;
+    margin: 16px;
     padding: 0;
     color: #1a1a1a;
     background-color: transparent;
@@ -54,24 +58,24 @@ body {
 }
 
 h1, h2, h3, h4 {
-    font-family: Georgia, "Times New Roman", serif;
-    line-height: 1.25;
-    margin-top: 1.2em;
-    margin-bottom: 0.45em;
+    font-family: "Literata", Charter, "Bitstream Charter", "Iowan Old Style", Palatino, Georgia, serif;
+    line-height: 1.22;
+    letter-spacing: -0.02em;
+    margin: 24px 0 8px 0;
     color: #111111;
 }
 
-h1 { font-size: 1.6em; }
+h1 { font-size: 1.65em; }
 h2 { font-size: 1.3em; }
 h3 { font-size: 1.12em; }
 
 p {
-    margin: 0 0 0.95em 0;
+    margin: 0 0 16px 0;
     text-align: left;
 }
 
 a {
-    color: #8b2e2e;
+    color: #9a4a2e;
     text-decoration: underline;
 }
 
@@ -79,168 +83,199 @@ img {
     max-width: 100%;
     height: auto;
     display: block;
-    margin: 1em auto;
+    margin: 24px auto 8px auto;
+    border-radius: 4px;
+}
+
+figure {
+    margin: 24px 0;
+    padding: 0;
+}
+
+figure img {
+    margin: 0 auto 8px auto;
+}
+
+figcaption, .wp-caption-text {
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    font-size: 0.82em;
+    line-height: 1.4;
+    color: #5c5750;
+    margin: 8px 0 24px 0;
+    text-align: left;
 }
 
 blockquote {
-    margin: 1em 0;
-    padding: 0.2em 0 0.2em 1em;
-    border-left: 3px solid #c9bfb0;
-    color: #444444;
+    margin: 24px 0;
+    padding: 4px 0 4px 16px;
+    border-left: 3px solid rgba(154, 74, 46, 0.35);
+    color: #4a453f;
     font-style: italic;
 }
 
 hr {
     border: 0;
-    border-top: 1px solid #d4cec4;
-    margin: 1.5em 0;
+    border-top: 1px solid rgba(26, 26, 26, 0.16);
+    margin: 24px 0;
 }
 
 /* Front page */
 .masthead {
-    border-bottom: 2px solid #1a1a1a;
-    padding-bottom: 0.6em;
-    margin-bottom: 1em;
+    border-bottom: 1px solid rgba(26, 26, 26, 0.2);
+    padding-bottom: 16px;
+    margin-bottom: 24px;
 }
 
 .masthead-kicker {
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
     font-size: 0.72em;
-    letter-spacing: 0.12em;
+    font-weight: 600;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
-    color: #8b2e2e;
-    margin: 0 0 0.25em 0;
+    color: #9a4a2e;
+    margin: 0 0 4px 0;
 }
 
 .masthead-title {
     font-size: 1.9em;
-    margin: 0 0 0.2em 0;
+    letter-spacing: -0.025em;
+    margin: 0 0 8px 0;
 }
 
 .masthead-meta {
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-    font-size: 0.85em;
-    color: #5a5a5a;
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    font-size: 0.82em;
+    color: #5c5750;
     margin: 0;
 }
 
 .editor-note {
-    background-color: #f6f3ec;
-    border-left: 3px solid #8b2e2e;
-    padding: 0.75em 0.9em;
-    margin: 1em 0 1.4em 0;
-    font-size: 0.95em;
+    background-color: rgba(154, 74, 46, 0.06);
+    border: 1px solid rgba(154, 74, 46, 0.16);
+    border-radius: 8px;
+    padding: 16px;
+    margin: 0 0 32px 0;
+    font-size: 0.94em;
+    line-height: 1.5;
 }
 
-.toc-heading {
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-    font-size: 0.8em;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: #5a5a5a;
-    margin: 1.2em 0 0.7em 0;
-}
-
-.toc-list {
-    list-style: none;
-    padding: 0;
+.editor-note p {
     margin: 0;
 }
 
+.toc-heading {
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    font-size: 0.75em;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #5c5750;
+    margin: 0 0 16px 0;
+}
+
+/* Flush-left div-based TOC (avoids Moon+ Reader <ol> auto-indent) */
+.toc-list {
+    margin: 0;
+    padding: 0;
+}
+
 .toc-item {
-    border-bottom: 1px solid #e4dfd5;
-    padding: 0.75em 0;
+    border-bottom: 1px solid rgba(26, 26, 26, 0.12);
+    padding: 0 0 16px 0;
+    margin: 0 0 16px 0;
 }
 
 .toc-item-title {
     display: block;
     font-size: 1.08em;
     font-weight: bold;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
     text-decoration: none;
     color: #1a1a1a;
-    margin-bottom: 0.25em;
+    margin: 0 0 4px 0;
 }
 
 .toc-item-meta {
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
     font-size: 0.8em;
-    color: #5a5a5a;
+    line-height: 1.4;
+    color: #5c5750;
     margin: 0;
 }
 
-/* Badges */
+/* Badges — spaced cleanly with 8px left margin */
 .badge {
     display: inline-block;
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
     font-size: 0.72em;
-    font-weight: bold;
-    letter-spacing: 0.05em;
+    font-weight: 600;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
-    padding: 0.15em 0.5em;
-    border-radius: 3px;
+    padding: 2px 8px;
+    border-radius: 4px;
     vertical-align: middle;
-    margin-left: 0.35em;
+    margin-left: 8px;
 }
 
 .badge-wildcard {
-    background-color: #8b2e2e;
-    color: #ffffff;
+    background-color: rgba(154, 74, 46, 0.12);
+    border: 1px solid #9a4a2e;
+    color: #9a4a2e;
 }
 
 .badge-link-card {
-    background-color: #e6dfd3;
-    color: #3d352e;
-}
-
-.badge-time {
-    background-color: #efece6;
-    color: #333333;
+    background-color: transparent;
+    border: 1px solid rgba(26, 26, 26, 0.28);
+    color: #4a453f;
 }
 
 /* Article header & editorial callout */
 .article-header {
-    border-bottom: 1px solid #d4cec4;
-    padding-bottom: 0.8em;
-    margin-bottom: 1.1em;
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid rgba(26, 26, 26, 0.16);
 }
 
 .article-source {
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-    font-size: 0.8em;
-    font-weight: bold;
-    letter-spacing: 0.06em;
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    font-size: 0.78em;
+    font-weight: 600;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: #8b2e2e;
-    margin: 0 0 0.35em 0;
+    color: #9a4a2e;
+    margin: 0 0 8px 0;
 }
 
 .article-title {
-    margin: 0 0 0.4em 0;
+    margin: 0 0 8px 0;
 }
 
 .article-byline {
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-    font-size: 0.85em;
-    color: #5a5a5a;
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    font-size: 0.82em;
+    color: #5c5750;
     margin: 0;
 }
 
 .why-picked-box {
-    background-color: #f6f3ec;
-    border-left: 4px solid #8b2e2e;
-    padding: 0.75em 0.95em;
-    margin: 0 0 1.3em 0;
+    background-color: rgba(154, 74, 46, 0.06);
+    border: 1px solid rgba(154, 74, 46, 0.16);
+    border-radius: 8px;
+    padding: 16px;
+    margin: 0 0 24px 0;
     font-size: 0.93em;
+    line-height: 1.48;
 }
 
 .why-picked-label {
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-    font-size: 0.75em;
-    font-weight: bold;
-    letter-spacing: 0.08em;
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    font-size: 0.72em;
+    font-weight: 600;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: #8b2e2e;
-    margin: 0 0 0.25em 0;
+    color: #9a4a2e;
+    margin: 0 0 4px 0;
 }
 
 .why-picked-text {
@@ -248,48 +283,75 @@ hr {
 }
 
 .article-body {
-    margin-top: 0.5em;
+    margin-top: 8px;
 }
 
 /* Curated link-card fallback */
 .link-card {
-    background-color: #f8f5ef;
-    border: 1px solid #d4cec4;
-    border-left: 4px solid #8b2e2e;
-    padding: 1em;
-    margin: 1em 0;
+    background-color: rgba(154, 74, 46, 0.06);
+    border: 1px solid rgba(154, 74, 46, 0.22);
+    border-radius: 8px;
+    padding: 16px;
+    margin: 16px 0;
 }
 
 .link-card-meta {
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-    font-size: 0.85em;
-    color: #5a5a5a;
-    margin-bottom: 0.4em;
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    font-size: 0.82em;
+    color: #5c5750;
+    margin: 0 0 8px 0;
 }
 
 .link-card-title {
     font-size: 1.15em;
     font-weight: bold;
-    margin-bottom: 0.6em;
+    line-height: 1.25;
+    margin: 0 0 8px 0;
 }
 
 .link-card-why {
-    margin-bottom: 0.75em;
+    margin: 0 0 16px 0;
 }
 
 .link-card-notice {
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-    font-size: 0.85em;
-    color: #5a5a5a;
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    font-size: 0.82em;
+    color: #5c5750;
+    margin: 0;
 }
 
 .article-footer {
-    border-top: 1px solid #d4cec4;
-    margin-top: 1.8em;
-    padding-top: 0.8em;
-    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    border-top: 1px solid rgba(26, 26, 26, 0.16);
+    margin-top: 32px;
+    padding-top: 16px;
+    font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
     font-size: 0.82em;
-    color: #5a5a5a;
+    color: #5c5750;
+}
+
+@media (prefers-color-scheme: dark) {
+    body { color: #e8e6e1; }
+    h1, h2, h3, h4, .toc-item-title { color: #f2f0eb; }
+    a, .masthead-kicker, .article-source, .why-picked-label { color: #e59a7e; }
+    .masthead-meta, .toc-heading, .toc-item-meta, .article-byline, figcaption, .wp-caption-text, .link-card-meta, .link-card-notice, .article-footer {
+        color: #b5afa6;
+    }
+    .editor-note, .why-picked-box, .link-card {
+        background-color: rgba(229, 154, 126, 0.09);
+        border-color: rgba(229, 154, 126, 0.22);
+    }
+    .badge-wildcard {
+        background-color: rgba(229, 154, 126, 0.14);
+        border-color: #e59a7e;
+        color: #e59a7e;
+    }
+    .badge-link-card {
+        border-color: rgba(232, 230, 225, 0.3);
+        color: #c8c3ba;
+    }
+    .masthead, .toc-item, .article-header, .article-footer, hr {
+        border-color: rgba(232, 230, 225, 0.18);
+    }
 }
 """
 
@@ -301,6 +363,23 @@ def default_epub_filename(edition_date: str) -> str:
 
 def _chapter_filename(index: int) -> str:
     return f"article_{index:02d}.xhtml"
+
+
+def format_published_date(raw: str) -> str:
+    """Format an ISO date/datetime string (e.g. '2026-11-25T13:00:03+00:00') cleanly."""
+    cleaned = raw.strip()
+    if not cleaned:
+        return ""
+    try:
+        dt = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+        return dt.strftime("%b %-d, %Y")
+    except ValueError:
+        pass
+    try:
+        d = date.fromisoformat(cleaned[:10])
+        return d.strftime("%b %-d, %Y")
+    except ValueError:
+        return cleaned
 
 
 def _render_frontpage_html(
@@ -320,19 +399,20 @@ def _render_frontpage_html(
         meta_parts = [escaped_source]
         if article.author:
             meta_parts.append(html.escape(article.author))
+        meta_parts.append(f"{article.reading_minutes} min")
         meta_text = " &middot; ".join(meta_parts)
 
-        badges = [f'<span class="badge badge-time">{article.reading_minutes} min</span>']
+        badges: list[str] = []
         if article.is_wildcard:
             badges.append('<span class="badge badge-wildcard">Wildcard</span>')
         if article.is_link_card:
             badges.append('<span class="badge badge-link-card">Link Card</span>')
 
         toc_items.append(
-            '<li class="toc-item">'
+            '<div class="toc-item">'
             f'<a class="toc-item-title" href="{href}">{escaped_title}</a>'
-            f'<p class="toc-item-meta">{meta_text} {"".join(badges)}</p>'
-            "</li>"
+            f'<p class="toc-item-meta">{meta_text}{"".join(badges)}</p>'
+            "</div>"
         )
 
     editor_note_html = ""
@@ -359,9 +439,9 @@ def _render_frontpage_html(
         "  </div>\n"
         f"  {editor_note_html}\n"
         '  <h2 class="toc-heading">In Today&#39;s Edition</h2>\n'
-        '  <ol class="toc-list">\n'
+        '  <div class="toc-list">\n'
         f'    {"".join(toc_items)}\n'
-        "  </ol>\n"
+        "  </div>\n"
         "</body>\n"
         "</html>\n"
     )
@@ -446,9 +526,11 @@ def _render_article_html(article: ExtractedArticle, content_html: str | None = N
 
     byline_parts: list[str] = []
     if article.author:
-        byline_parts.append(f"By {html.escape(article.author)}")
+        byline_parts.append(html.escape(article.author))
     if article.published_at:
-        byline_parts.append(html.escape(article.published_at))
+        formatted_pub = format_published_date(article.published_at)
+        if formatted_pub:
+            byline_parts.append(html.escape(formatted_pub))
     byline_parts.append(f"{article.reading_minutes} min read")
     byline_html = " &middot; ".join(byline_parts)
 
@@ -494,7 +576,7 @@ def build_epub(
     embed_images: bool = True,
     http_client: httpx.Client | None = None,
 ) -> Path:
-    """Assemble a phone-optimized EPUB for the given ExtractedEdition."""
+    """Assemble a phone-optimized EPUB ("The Quiet Folio") for the given ExtractedEdition."""
     book = epub.EpubBook()
     book.set_identifier(f"the-reading-{edition.edition_date}")
     book.set_title(f"{title} — {edition.edition_date}")
@@ -503,13 +585,23 @@ def build_epub(
     book.add_metadata("DC", "date", edition.edition_date)
 
     # Generate and attach dynamic daily cover
-    lead_headline = edition.articles[0].title if edition.articles else "Daily Curated Edition"
+    lead_article = edition.articles[0] if edition.articles else None
+    lead_headline = lead_article.title if lead_article else "Daily Curated Edition"
+    lead_meta_parts: list[str] = []
+    if lead_article:
+        if lead_article.author:
+            lead_meta_parts.append(lead_article.author)
+        if lead_article.source:
+            lead_meta_parts.append(lead_article.source)
+    lead_meta = " · ".join(lead_meta_parts)
+
     cover_bytes = generate_cover_image(
         edition_date=edition.edition_date,
         lead_headline=lead_headline,
         total_reading_minutes=edition.total_reading_minutes,
         article_count=len(edition.articles),
         title=title,
+        lead_meta=lead_meta,
     )
     book.set_cover("cover.png", cover_bytes, create_page=True)
 
