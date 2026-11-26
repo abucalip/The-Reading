@@ -9,7 +9,7 @@ from pathlib import Path
 from ebooklib import epub
 from PIL import Image
 
-from the_reading.epub.builder import build_epub, default_epub_filename
+from the_reading.epub.builder import build_epub, default_epub_filename, format_published_date
 from the_reading.epub.cover import (
     COVER_HEIGHT,
     COVER_WIDTH,
@@ -70,6 +70,9 @@ def test_cover_formatting_helpers() -> None:
     assert format_reading_time(45) == "45 min read"
     assert format_reading_time(60) == "1h read"
     assert format_reading_time(85) == "1h 25m read"
+    assert format_published_date("2026-11-25T13:00:03+00:00") == "Nov 25, 2026"
+    assert format_published_date("2026-11-20") == "Nov 20, 2026"
+    assert format_published_date("") == ""
 
 
 def test_generate_cover_image_portrait_png(tmp_path: Path) -> None:
