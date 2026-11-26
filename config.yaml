@@ -17,9 +17,18 @@ interest:
   max_discovery_queries: 8
 
 delivery:
+  gdrive_enabled: false
   drive_folder_name: "The Reading"
   archive_subfolder_name: "Archive"
   archive_after_days: 21
+  opds:
+    enabled: true
+    title: "The Reading"
+    author: "The Reading"
+    base_url: ""
+    host: "0.0.0.0"
+    port: 8088
+    retain_days: 21
 
 feeds:
   - name: "The Paris Review"

@@ -35,10 +35,22 @@ class InterestConfig(BaseModel):
     max_discovery_queries: int = 8
 
 
+class OpdsConfig(BaseModel):
+    enabled: bool = True
+    title: str = "The Reading"
+    author: str = "The Reading"
+    base_url: str = ""
+    host: str = "0.0.0.0"
+    port: int = 8088
+    retain_days: int = 21
+
+
 class DeliveryConfig(BaseModel):
+    gdrive_enabled: bool = True
     drive_folder_name: str = "The Reading"
     archive_subfolder_name: str = "Archive"
     archive_after_days: int = 21
+    opds: OpdsConfig = Field(default_factory=OpdsConfig)
 
 
 class AppConfig(BaseModel):

@@ -16,12 +16,15 @@ services:
     volumes:
       - ./data:/data
       - ./config.yaml:/app/config.yaml:ro
-    # Run daily on CRON_SCHEDULE; for one-off runs use:
+    ports:
+      - "${OPDS_PORT:-8088}:8088"
+    # Run OPDS server + daily cron; for one-off runs use:
     #   docker compose run --rm --entrypoint the-reading the-reading --dry-run
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         python3 -c 'import os, shlex; [print(f"export {k}={shlex.quote(v)}") for k, v in os.environ.items()]' > /etc/environment.sh
         printf '%s . /etc/environment.sh && /usr/local/bin/the-reading >> /proc/1/fd/1 2>&1\n' "${CRON_SCHEDULE:-0 6 * * *}" | crontab -
-        echo "Scheduled The Reading with cron: ${CRON_SCHEDULE:-0 6 * * *}"
+        echo "Starting OPDS server on port 8088 and scheduling cron: ${CRON_SCHEDULE:-0 6 * * *}"
+        /usr/local/bin/the-reading --serve-opds >> /proc/1/fd/1 2>&1 &
         exec cron -f

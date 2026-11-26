@@ -13,6 +13,7 @@ from typing import Sequence
 from the_reading.config import Settings, load_settings
 from the_reading.curator.gemini import curate_edition
 from the_reading.delivery.gdrive import DeliveryResult, GDriveDeliverer
+from the_reading.delivery.opds import OpdsPublisher, OpdsPublishResult, serve_opds
 from the_reading.epub.builder import build_epub, default_epub_filename
 from the_reading.extractor.article import extract_edition
 from the_reading.feeds.pool import collect_candidates
@@ -39,6 +40,7 @@ class PipelineSummary:
     delivery: DeliveryResult | None
     marked_sent: int
     dry_run: bool
+    opds: OpdsPublishResult | None = None
 
 
 def _parse_date(value: str) -> str:
@@ -71,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-upload",
         action="store_true",
         help="Build the EPUB and update local state, but skip Google Drive upload.",
+    )
+    parser.add_argument(
+        "--serve-opds",
+        action="store_true",
+        help="Publish the OPDS catalog and run the built-in OPDS HTTP server for Moon+ Reader.",
     )
     parser.add_argument(
         "--date",
@@ -225,12 +232,21 @@ def run_pipeline(
         size_kb = built_path.stat().st_size / 1024
 
         delivery_result: DeliveryResult | None = None
+        opds_result: OpdsPublishResult | None = None
         if dry_run:
-            logger.info("Dry-run: skipping Google Drive upload and sent_articles update.")
+            logger.info("Dry-run: skipping delivery, OPDS publish, and sent_articles update.")
             delivery_result = DeliveryResult(dry_run=True)
             marked_sent = 0
         else:
-            if not skip_upload:
+            ref_date = date.fromisoformat(target_date)
+            if settings.app.delivery.opds.enabled:
+                opds_publisher = OpdsPublisher(
+                    editions_dir=built_path.parent,
+                    config=settings.app.delivery.opds,
+                )
+                opds_result = opds_publisher.publish(reference_date=ref_date)
+
+            if not skip_upload and (deliverer is not None or settings.app.delivery.gdrive_enabled):
                 active_deliverer = deliverer or GDriveDeliverer(
                     config=settings.app.delivery,
                     credentials_path=settings.env.gdrive_credentials_path,
@@ -238,10 +254,12 @@ def run_pipeline(
                 )
                 delivery_result = active_deliverer.deliver(
                     built_path,
-                    reference_date=date.fromisoformat(target_date),
+                    reference_date=ref_date,
                 )
-            else:
+            elif skip_upload:
                 logger.info("Skipping Google Drive upload (--skip-upload).")
+            else:
+                logger.info("Google Drive delivery disabled in config.")
 
             marked_sent = 0
             for article in extracted.articles:
@@ -266,6 +284,7 @@ def run_pipeline(
         delivery=delivery_result,
         marked_sent=marked_sent,
         dry_run=dry_run,
+        opds=opds_result,
     )
 
 
@@ -281,10 +300,15 @@ def _print_summary(summary: PipelineSummary) -> None:
     )
     if summary.epub_path is not None:
         print(f"EPUB:       {summary.epub_path} ({summary.epub_size_kb:.1f} KB)")
+    if summary.opds is not None:
+        print(
+            f"OPDS:       {summary.opds.catalog_path} "
+            f"({summary.opds.entry_count} editions, pruned {len(summary.opds.pruned_files)})"
+        )
     if summary.dry_run:
         print("Delivery:   skipped (dry-run)")
     elif summary.delivery is None:
-        print("Delivery:   skipped (--skip-upload)")
+        print("Delivery:   skipped (disabled or --skip-upload)")
     elif summary.delivery.upload is not None:
         action = "updated" if summary.delivery.upload.updated else "uploaded"
         print(
@@ -304,6 +328,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.test_connectors:
         return run_test_connectors(settings)
+
+    if args.serve_opds:
+        serve_opds(settings.env.data_dir / "editions", settings.app.delivery.opds)
+        return 0
 
     summary = run_pipeline(
         settings=settings,
