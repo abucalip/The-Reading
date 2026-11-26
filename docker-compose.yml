@@ -21,9 +21,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        printenv | sed 's/^\(.*\)$/export \1/g' > /etc/environment.sh
-        echo "${CRON_SCHEDULE:-0 6 * * *} . /etc/environment.sh && /usr/local/bin/the-reading >> /proc/1/fd/1 2>&1" > /etc/cron.d/the-reading
-        chmod 0644 /etc/cron.d/the-reading
-        crontab /etc/cron.d/the-reading
+        python3 -c 'import os, shlex; [print(f"export {k}={shlex.quote(v)}") for k, v in os.environ.items()]' > /etc/environment.sh
+        printf '%s . /etc/environment.sh && /usr/local/bin/the-reading >> /proc/1/fd/1 2>&1\n' "${CRON_SCHEDULE:-0 6 * * *}" | crontab -
         echo "Scheduled The Reading with cron: ${CRON_SCHEDULE:-0 6 * * *}"
         exec cron -f
