@@ -6,6 +6,7 @@ import base64
 import logging
 import re
 from collections import Counter
+from dataclasses import dataclass
 from urllib.parse import quote_plus, urlparse
 
 import feedparser
@@ -70,6 +71,92 @@ def _clean_series_title(title: str) -> str:
     return _YEAR_SUFFIX_RE.sub("", title).strip()
 
 
+@dataclass
+class _TopicMeta:
+    name: str
+    year: int | None = None
+    network: str | None = None
+    creator: str | None = None
+    imdb_id: str | None = None
+
+
+_NETWORK_ALIASES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^bbc\b.*", re.IGNORECASE), "BBC"),
+    (re.compile(r"^hbo\b.*", re.IGNORECASE), "HBO"),
+    (re.compile(r"^itv\b.*", re.IGNORECASE), "ITV"),
+    (re.compile(r"^apple\s*tv\+?", re.IGNORECASE), "Apple TV"),
+    (re.compile(r"^amazon\s*prime.*", re.IGNORECASE), "Prime Video"),
+    (re.compile(r"^disney\+?", re.IGNORECASE), "Disney+"),
+)
+
+
+def _normalize_network_for_search(network: str | None) -> str | None:
+    if not network:
+        return None
+    cleaned = network.strip()
+    if not cleaned:
+        return None
+    for pattern, replacement in _NETWORK_ALIASES:
+        if pattern.match(cleaned):
+            return replacement
+    return cleaned
+
+
+def _is_generic_title(name: str) -> bool:
+    """Return True for short or single-word titles prone to search ambiguity (e.g. 'Time')."""
+    words = [w for w in re.split(r"\s+", name.strip()) if w]
+    return len(words) <= 1 or len(name.strip()) <= 5
+
+
+def _build_series_query(meta: _TopicMeta) -> str:
+    net = _normalize_network_for_search(meta.network)
+    generic = _is_generic_title(meta.name)
+    if generic and net and meta.year:
+        return f'"{meta.name}" "{net}" {meta.year} (series OR TV OR drama) (review OR essay OR analysis OR interview)'
+    if net:
+        return f'"{meta.name}" "{net}" series (essay OR review OR analysis OR interview)'
+    if generic and meta.creator:
+        return f'"{meta.name}" "{meta.creator}" series (essay OR review OR analysis OR interview)'
+    if generic and meta.year:
+        return f'"{meta.name}" {meta.year} TV series (essay OR review OR analysis OR interview)'
+    return f'"{meta.name}" series (essay OR review OR analysis OR interview)'
+
+
+def _build_film_query(meta: _TopicMeta) -> str:
+    generic = _is_generic_title(meta.name)
+    if generic and meta.creator:
+        return f'"{meta.name}" "{meta.creator}" film (essay OR review OR analysis OR retrospective)'
+    if generic and meta.year:
+        return f'"{meta.name}" {meta.year} film (essay OR review OR analysis OR retrospective)'
+    return f'"{meta.name}" film (essay OR review OR analysis OR retrospective)'
+
+
+def _merge_topic(topics: dict[str, _TopicMeta], name: str, signal: object) -> None:
+    key = name.lower()
+    existing = topics.get(key)
+    year = getattr(signal, "year", None)
+    network = getattr(signal, "network", None)
+    creator = getattr(signal, "creator", None)
+    imdb_id = getattr(signal, "imdb_id", None)
+    if existing is None:
+        topics[key] = _TopicMeta(
+            name=name,
+            year=year,
+            network=network,
+            creator=creator,
+            imdb_id=imdb_id,
+        )
+    else:
+        if existing.year is None and year is not None:
+            existing.year = year
+        if existing.network is None and network:
+            existing.network = network
+        if existing.creator is None and creator:
+            existing.creator = creator
+        if existing.imdb_id is None and imdb_id:
+            existing.imdb_id = imdb_id
+
+
 def build_discovery_queries(
     profile: InterestProfile,
     max_queries: int = 8,
@@ -77,25 +164,26 @@ def build_discovery_queries(
     """Build balanced (kind, topic, query) tuples from the user's interest profile.
 
     Round-robins across films, series, and music (artists + genres) so every
-    active interest category gets representation.
+    active interest category gets representation. Uses disambiguating metadata
+    (network, year, creator) for short/generic titles like 'Time' (BBC, 2021).
     """
     if max_queries <= 0 or not profile.signals:
         return []
 
-    film_topics: list[str] = []
-    series_topics: list[str] = []
+    film_topics: dict[str, _TopicMeta] = {}
+    series_topics: dict[str, _TopicMeta] = {}
     artist_counts: Counter[str] = Counter()
     genre_counts: Counter[str] = Counter()
 
     for signal in profile.signals:
         if signal.kind == "film":
             name = _clean_film_title(signal.title)
-            if name and not _TMDB_PLACEHOLDER_RE.match(name) and name not in film_topics:
-                film_topics.append(name)
+            if name and not _TMDB_PLACEHOLDER_RE.match(name):
+                _merge_topic(film_topics, name, signal)
         elif signal.kind == "series":
             name = _clean_series_title(signal.title)
-            if name and not _TMDB_PLACEHOLDER_RE.match(name) and name not in series_topics:
-                series_topics.append(name)
+            if name and not _TMDB_PLACEHOLDER_RE.match(name):
+                _merge_topic(series_topics, name, signal)
         elif signal.kind == "music":
             if signal.creator and signal.creator.strip():
                 artist_counts[signal.creator.strip()] += 1
@@ -105,12 +193,12 @@ def build_discovery_queries(
                     genre_counts[g] += 1
 
     film_queries = [
-        ("film", topic, f'"{topic}" film (essay OR review OR analysis OR retrospective)')
-        for topic in film_topics
+        ("film", meta.name, _build_film_query(meta))
+        for meta in film_topics.values()
     ]
     series_queries = [
-        ("series", topic, f'"{topic}" series (essay OR review OR analysis OR interview)')
-        for topic in series_topics
+        ("series", meta.name, _build_series_query(meta))
+        for meta in series_topics.values()
     ]
 
     music_queries: list[tuple[str, str, str]] = []

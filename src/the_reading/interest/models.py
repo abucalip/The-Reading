@@ -19,6 +19,10 @@ class SignalItem(BaseModel):
     timestamp: str
     rating: float | None = None
     notes: str | None = None
+    year: int | None = None
+    network: str | None = None
+    imdb_id: str | None = None
+    tmdb_id: str | None = None
 
 
 class InterestProfile(BaseModel):
@@ -46,10 +50,19 @@ class InterestProfile(BaseModel):
             lines.append(f"\n[{source}]")
             for item in items[:max_items_per_source]:
                 parts = [f"- {item.title}"]
+                meta: list[str] = []
+                if item.year is not None and f"({item.year})" not in item.title:
+                    meta.append(str(item.year))
+                if item.network:
+                    meta.append(item.network)
+                if meta:
+                    parts.append(f"({', '.join(meta)})")
                 if item.creator:
                     parts.append(f"by {item.creator}")
                 if item.genres:
                     parts.append(f"[{', '.join(item.genres[:3])}]")
+                if item.imdb_id:
+                    parts.append(f"[imdb:{item.imdb_id}]")
                 if item.rating is not None:
                     parts.append(f"(rated {item.rating:g})")
                 if item.notes:

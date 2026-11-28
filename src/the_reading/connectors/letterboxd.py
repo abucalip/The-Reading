@@ -65,7 +65,16 @@ class LetterboxdConnector:
     def _entry_to_signal(entry: dict, dt: datetime) -> SignalItem:
         film_title = entry.get("letterboxd_filmtitle") or entry.get("title") or "Untitled"
         film_year = entry.get("letterboxd_filmyear")
+        year: int | None = None
+        if film_year is not None:
+            try:
+                year = int(str(film_year).strip())
+            except (TypeError, ValueError):
+                year = None
         title = f"{film_title} ({film_year})" if film_year else str(film_title)
+
+        tmdb_raw = entry.get("tmdb_movieid")
+        tmdb_id = str(tmdb_raw).strip() if tmdb_raw is not None and str(tmdb_raw).strip() else None
 
         rating_raw = entry.get("letterboxd_memberrating")
         rating: float | None = None
@@ -83,6 +92,8 @@ class LetterboxdConnector:
             timestamp=dt.isoformat(),
             rating=rating,
             notes=notes,
+            year=year,
+            tmdb_id=tmdb_id,
         )
 
     def fetch_signals(self, lookback_days: int) -> list[SignalItem]:

@@ -73,21 +73,45 @@ class SeerrConnector:
                 ]
 
                 tmdb_id = media.get("tmdbId")
-                if not title and tmdb_id is not None:
+                imdb_id_raw = media.get("imdbId")
+                imdb_id = str(imdb_id_raw).strip() if imdb_id_raw else None
+                year: int | None = None
+                network: str | None = None
+                creator: str | None = None
+
+                if tmdb_id is not None and (not title or not imdb_id or not network or year is None):
                     detail = self._fetch_media_detail(client, headers, media_type, tmdb_id)
                     if detail:
-                        title = (
-                            detail.get("title")
-                            or detail.get("name")
-                            or detail.get("originalTitle")
-                            or detail.get("originalName")
-                        )
+                        if not title:
+                            title = (
+                                detail.get("title")
+                                or detail.get("name")
+                                or detail.get("originalTitle")
+                                or detail.get("originalName")
+                            )
                         if not genres:
                             genres = [
                                 g["name"]
                                 for g in (detail.get("genres") or [])
                                 if isinstance(g, dict) and g.get("name")
                             ]
+                        date_raw = detail.get("firstAirDate") or detail.get("releaseDate")
+                        if isinstance(date_raw, str) and len(date_raw) >= 4 and date_raw[:4].isdigit():
+                            year = int(date_raw[:4])
+                        networks = detail.get("networks") or []
+                        for net in networks:
+                            if isinstance(net, dict) and net.get("name"):
+                                network = str(net["name"]).strip()
+                                break
+                        created_by = detail.get("createdBy") or []
+                        for person in created_by:
+                            if isinstance(person, dict) and person.get("name"):
+                                creator = str(person["name"]).strip()
+                                break
+                        if not imdb_id:
+                            ext_ids = detail.get("externalIds") or {}
+                            if isinstance(ext_ids, dict) and ext_ids.get("imdbId"):
+                                imdb_id = str(ext_ids["imdbId"]).strip()
 
                 if not title:
                     title = f"TMDB #{tmdb_id if tmdb_id is not None else 'unknown'}"
@@ -97,8 +121,13 @@ class SeerrConnector:
                         source="seerr",
                         kind=kind,
                         title=str(title),
+                        creator=creator,
                         genres=genres,
                         timestamp=created_dt.isoformat(),
+                        year=year,
+                        network=network,
+                        imdb_id=imdb_id,
+                        tmdb_id=str(tmdb_id) if tmdb_id is not None else None,
                     )
                 )
 
